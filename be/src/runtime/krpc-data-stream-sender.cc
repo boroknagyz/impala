@@ -241,6 +241,8 @@ class KrpcDataStreamSender::Channel : public CacheLineAligned {
   // Only used if the partitioning scheme is "KUDU" or "HASH_PARTITIONED".
   scoped_ptr<RowBatch> batch_;
 
+  TupleRow* last_row_ = nullptr;
+
   // Owns an outbound row batch that can be referenced by the in-flight RPC. Contains
   // a RowBatchHeaderPB and the buffers for the serialized tuple offsets and data.
   //
@@ -624,6 +626,7 @@ Status KrpcDataStreamSender::Channel::SerializeAndSendBatch(RowBatch* batch) {
 Status KrpcDataStreamSender::Channel::SendCurrentBatch() {
   RETURN_IF_ERROR(SerializeAndSendBatch(batch_.get()));
   batch_->Reset();
+  last_row_ = nullptr;
   return Status::OK();
 }
 
@@ -638,9 +641,17 @@ inline Status KrpcDataStreamSender::Channel::AddRow(TupleRow* row) {
     if (UNLIKELY(row->GetTuple(i) == nullptr)) {
       dest->SetTuple(i, nullptr);
     } else {
-      dest->SetTuple(i, row->GetTuple(i)->DeepCopy(*descs[i], batch_->tuple_data_pool()));
+      if (last_row_ == nullptr) {
+        dest->SetTuple(i, row->GetTuple(i)->DeepCopy(*descs[i], batch_->tuple_data_pool()));
+      } else {
+        Tuple* last_tuple = last_row_->GetTuple(i);
+        dest->SetTuple(i, row->GetTuple(i)->DeepCopyDedupStrings(*descs[i],
+            last_tuple,
+            batch_->tuple_data_pool()));
+      }
     }
   }
+  last_row_ = dest;
   batch_->CommitLastRow();
   return Status::OK();
 }

@@ -255,6 +255,7 @@ Status RowBatch::Serialize(
 
   RETURN_IF_ERROR(Serialize(full_dedup ? &distinct_tuples : nullptr,
       output_batch, &is_compressed, size, compression_scratch));
+  // output_batch->tuple_data_.resize(size);
 
   // Initialize the RowBatchHeaderPB
   RowBatchHeaderPB* header = &output_batch->header_;
@@ -268,11 +269,12 @@ Status RowBatch::Serialize(
 }
 
 Status RowBatch::Serialize(DedupMap* distinct_tuples, OutboundRowBatch* output_batch,
-    bool* is_compressed, int64_t size, TrackedString* compression_scratch) {
+    bool* is_compressed, int64_t& size, TrackedString* compression_scratch) {
   char* tuple_data = const_cast<char*>(output_batch->tuple_data_.data());
   std::vector<int32_t>* tuple_offsets = &output_batch->tuple_offsets_;
 
   RETURN_IF_ERROR(SerializeInternal(size, distinct_tuples, tuple_offsets, tuple_data));
+  output_batch->tuple_data_.resize(size);
 
   *is_compressed = false;
 
@@ -325,7 +327,7 @@ bool RowBatch::UseFullDedup() {
   return false;
 }
 
-Status RowBatch::SerializeInternal(int64_t size, DedupMap* distinct_tuples,
+Status RowBatch::SerializeInternal(int64_t& size, DedupMap* distinct_tuples,
     vector<int32_t>* tuple_offsets, char* tuple_data) {
   DCHECK(distinct_tuples == nullptr || distinct_tuples->size() == 0);
 
@@ -334,6 +336,7 @@ Status RowBatch::SerializeInternal(int64_t size, DedupMap* distinct_tuples,
   // Copy tuple data of unique tuples, including strings, into output_batch (converting
   // string pointers into offsets in the process).
   int offset = 0; // current offset into output_batch->tuple_data
+  char* tuple_data_start = tuple_data;
 
   for (int i = 0; i < num_rows_; ++i) {
     vector<TupleDescriptor*>::const_iterator desc =
@@ -344,10 +347,19 @@ Status RowBatch::SerializeInternal(int64_t size, DedupMap* distinct_tuples,
         // NULLs are encoded as -1
         tuple_offsets->push_back(-1);
         continue;
-      } else if (LIKELY(i > 0) && UNLIKELY(GetRow(i - 1)->GetTuple(j) == tuple)) {
-        // Fast tuple deduplication for adjacent rows.
+      }
+      Tuple* prev_tuple = LIKELY(i > 0) ? GetRow(i-1)->GetTuple(j) : nullptr;
+      Tuple* prev_serialized_tuple = nullptr;
+      int prev_tuple_offset = -1;
+      if (prev_tuple != nullptr) {
         int prev_row_idx = tuple_offsets->size() - num_tuples_per_row_;
-        tuple_offsets->push_back((*tuple_offsets)[prev_row_idx]);
+        prev_tuple_offset = (*tuple_offsets)[prev_row_idx];
+        prev_serialized_tuple = reinterpret_cast<Tuple*>(
+            tuple_data_start + prev_tuple_offset);
+      }
+      if (LIKELY(i > 0) && prev_tuple == tuple) {
+        // Fast tuple deduplication for adjacent rows.
+        tuple_offsets->push_back(prev_tuple_offset);
         continue;
       } else if (UNLIKELY(distinct_tuples != nullptr)) {
         if ((*desc)->byte_size() == 0) {
@@ -363,13 +375,19 @@ Status RowBatch::SerializeInternal(int64_t size, DedupMap* distinct_tuples,
           continue;
         }
       }
+      // for (auto slot : (**desc).string_slots()) {
+      //   if (tuple->IsNull(slot->null_indicator_offset())) continue;
+      //   StringValue* string_v = tuple->GetStringSlot(slot->tuple_offset());
+      //   VLOG_QUERY << "ASDF string_v = " << string_v->DebugString() << " ptr_val = " << reinterpret_cast<int64_t>(string_v->Ptr());
+      // }
       // Record offset before creating copy (which increments offset and tuple_data)
       tuple_offsets->push_back(offset);
-      tuple->DeepCopy(**desc, &tuple_data, &offset, /* convert_ptrs */ true);
+      tuple->DeepCopyDedupStrings(**desc, prev_tuple, prev_serialized_tuple, &tuple_data, &offset, /* convert_ptrs */ true);
       DCHECK_LE(offset, size);
     }
   }
-  DCHECK_EQ(offset, size);
+  DCHECK_LE(offset, size);
+  size = offset;
   return Status::OK();
 }
 

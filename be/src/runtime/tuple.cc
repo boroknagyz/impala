@@ -149,6 +149,67 @@ void Tuple::DeepCopyVarlenData(const TupleDescriptor& desc, MemPool* pool) {
   }
 }
 
+Tuple* Tuple::DeepCopyDedupStrings(const TupleDescriptor& desc, Tuple* last, MemPool* pool) {
+  Tuple* result = reinterpret_cast<Tuple*>(pool->Allocate(desc.byte_size()));
+  DeepCopyDedupStrings(result, desc, last, pool);
+  return result;
+}
+
+// TODO: the logic is very similar to the other DeepCopy implementation aside from how
+// memory is allocated - can we templatise it somehow to avoid redundancy without runtime
+// overhead.
+void Tuple::DeepCopyDedupStrings(Tuple* dst, const TupleDescriptor& desc, Tuple* last,
+    MemPool* pool) {
+  if (desc.HasVarlenSlots()) {
+    memcpy(dst, this, desc.byte_size());
+    dst->SmallifyStrings(desc);
+    dst->DeepCopyVarlenDataDedupStrings(desc, last, pool);
+  } else {
+    memcpy(dst, this, desc.byte_size());
+  }
+}
+
+void Tuple::DeepCopyVarlenDataDedupStrings(const TupleDescriptor& desc, Tuple* last, MemPool* pool) {
+  // allocate then copy all non-null string and collection slots
+  for (vector<SlotDescriptor*>::const_iterator slot = desc.string_slots().begin();
+       slot != desc.string_slots().end(); ++slot) {
+    DCHECK((*slot)->type().IsVarLenStringType());
+    if (IsNull((*slot)->null_indicator_offset())) continue;
+    StringValue* string_v = GetStringSlot((*slot)->tuple_offset());
+    if (string_v->IsSmall()) continue;
+    if (last != nullptr && !last->IsNull((*slot)->null_indicator_offset())) {
+      StringValue* prev_string_v = last->GetStringSlot((*slot)->tuple_offset());
+      if (*string_v == *prev_string_v) {
+        string_v->Assign(*prev_string_v);
+        continue;
+      }
+    } 
+
+    char* string_copy = reinterpret_cast<char*>(pool->Allocate(string_v->Len()));
+    Ubsan::MemCpy(string_copy, string_v->Ptr(), string_v->Len());
+    string_v->SetPtr(string_copy);
+  }
+
+  for (vector<SlotDescriptor*>::const_iterator slot = desc.collection_slots().begin();
+       slot != desc.collection_slots().end(); ++slot) {
+    DCHECK((*slot)->type().IsCollectionType());
+    if (IsNull((*slot)->null_indicator_offset())) continue;
+    CollectionValue* cv = GetCollectionSlot((*slot)->tuple_offset());
+    const TupleDescriptor* item_desc = (*slot)->children_tuple_descriptor();
+    int coll_byte_size = cv->num_tuples * item_desc->byte_size();
+    uint8_t* coll_data = reinterpret_cast<uint8_t*>(pool->Allocate(coll_byte_size));
+    memcpy(coll_data, cv->ptr, coll_byte_size);
+    cv->ptr = coll_data;
+    if (!item_desc->HasVarlenSlots()) continue;
+
+    for (int i = 0; i < cv->num_tuples; ++i) {
+      int item_offset = i * item_desc->byte_size();
+      Tuple* dst_item = reinterpret_cast<Tuple*>(coll_data + item_offset);
+      dst_item->DeepCopyVarlenData(*item_desc, pool);
+    }
+  }
+}
+
 void Tuple::DeepCopy(const TupleDescriptor& desc, char** data, int* offset,
                      bool convert_ptrs) {
   Tuple* dst = reinterpret_cast<Tuple*>(*data);
@@ -156,6 +217,74 @@ void Tuple::DeepCopy(const TupleDescriptor& desc, char** data, int* offset,
   *data += desc.byte_size();
   *offset += desc.byte_size();
   if (desc.HasVarlenSlots()) dst->DeepCopyVarlenData(desc, data, offset, convert_ptrs);
+}
+
+void Tuple::DeepCopyDedupStrings(const TupleDescriptor& desc, Tuple* prev_tuple, Tuple* prev_serialized_tuple, char** data, int* offset,
+                     bool convert_ptrs) {
+  Tuple* dst = reinterpret_cast<Tuple*>(*data);
+  memcpy(dst, this, desc.byte_size());
+  *data += desc.byte_size();
+  *offset += desc.byte_size();
+  if (desc.HasVarlenSlots()) dst->DeepCopyVarlenDataDedupStrings(desc, prev_tuple, prev_serialized_tuple, data, offset, convert_ptrs);
+}
+
+void Tuple::DeepCopyVarlenDataDedupStrings(const TupleDescriptor& desc, Tuple* prev_tuple, Tuple* prev_serialized_tuple, char** data, int* offset,
+    bool convert_ptrs) {
+  vector<SlotDescriptor*>::const_iterator slot = desc.string_slots().begin();
+  for (; slot != desc.string_slots().end(); ++slot) {
+    DCHECK((*slot)->type().IsVarLenStringType());
+    if (IsNull((*slot)->null_indicator_offset())) continue;
+
+    StringValue* string_v = GetStringSlot((*slot)->tuple_offset());
+    if (string_v->IsSmall()) continue;
+    if (prev_tuple != nullptr) {
+      DCHECK(prev_serialized_tuple != nullptr);
+      StringValue* prev_string_v = prev_tuple->GetStringSlot((*slot)->tuple_offset());
+      if (*prev_string_v == *string_v) {
+        if (prev_string_v->Ptr() != string_v->Ptr()) {
+          VLOG_QUERY << "Different ptr vals: " << reinterpret_cast<int64_t>(prev_string_v->Ptr())
+              << " " << reinterpret_cast<int64_t>(string_v->Ptr());
+        }
+        StringValue* serialized_string_v = prev_serialized_tuple->GetStringSlot((*slot)->tuple_offset());
+        string_v->Assign(*serialized_string_v);
+        continue;
+      } else {
+        // VLOG_QUERY << "ASDF current string = " << string_v->DebugString() << " ptr = " << reinterpret_cast<int64_t>(string_v->Ptr());
+        // VLOG_QUERY << "ASDF prev string = " << prev_string_v->DebugString() << " ptr = " << reinterpret_cast<int64_t>(prev_string_v->Ptr());
+      }
+    }
+
+    unsigned int len = string_v->Len();
+    Ubsan::MemCpy(*data, string_v->Ptr(), len);
+    string_v->SetPtr(convert_ptrs ? reinterpret_cast<char*>(*offset) : *data);
+    *data += len;
+    *offset += len;
+  }
+
+  slot = desc.collection_slots().begin();
+  for (; slot != desc.collection_slots().end(); ++slot) {
+    DCHECK((*slot)->type().IsCollectionType());
+    if (IsNull((*slot)->null_indicator_offset())) continue;
+
+    CollectionValue* coll_value = GetCollectionSlot((*slot)->tuple_offset());
+    const TupleDescriptor& item_desc = *(*slot)->children_tuple_descriptor();
+    int coll_byte_size = coll_value->num_tuples * item_desc.byte_size();
+    memcpy(*data, coll_value->ptr, coll_byte_size);
+    uint8_t* coll_data = reinterpret_cast<uint8_t*>(*data);
+
+    coll_value->ptr = convert_ptrs ? reinterpret_cast<uint8_t*>(*offset) : coll_data;
+
+    *data += coll_byte_size;
+    *offset += coll_byte_size;
+
+    // Copy per-tuple varlen data if necessary.
+    if (!item_desc.HasVarlenSlots()) continue;
+    for (int i = 0; i < coll_value->num_tuples; ++i) {
+      reinterpret_cast<Tuple*>(coll_data)->DeepCopyVarlenData(
+          item_desc, data, offset, convert_ptrs);
+      coll_data += item_desc.byte_size();
+    }
+  }
 }
 
 void Tuple::DeepCopyVarlenData(const TupleDescriptor& desc, char** data, int* offset,

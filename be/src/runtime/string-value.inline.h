@@ -65,6 +65,7 @@ inline bool StringValue::Eq(const StringValue& other) const {
   SimpleString this_s = ToSimpleString();
   SimpleString other_s = other.ToSimpleString();
   if (this_s.len != other_s.len) return false;
+  if (this_s.ptr == other_s.ptr) return true;
   return StringCompare(this_s.ptr, this_s.len, other_s.ptr, other_s.len, this_s.len) == 0;
 }
 

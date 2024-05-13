@@ -436,7 +436,7 @@ class RowBatch {
   ///
   /// Returns error status if serialization failed. Returns OK otherwise.
   Status Serialize(DedupMap* distinct_tuples, OutboundRowBatch* output_batch,
-      bool* is_compressed, int64_t size, TrackedString* compression_scratch);
+      bool* is_compressed, int64_t& size, TrackedString* compression_scratch);
 
   /// Implementation for protobuf to deserialize a row batch.
   ///
@@ -462,7 +462,7 @@ class RowBatch {
   /// enabled. The distinct_tuples map must be empty.
   int64_t TotalByteSize(DedupMap* distinct_tuples);
 
-  Status SerializeInternal(int64_t size, DedupMap* distinct_tuples,
+  Status SerializeInternal(int64_t& size, DedupMap* distinct_tuples,
       vector<int32_t>* tuple_offsets, char* tuple_data);
 
   /// All members below need to be handled in RowBatch::AcquireState()

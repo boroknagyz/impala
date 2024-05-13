@@ -134,6 +134,16 @@ class Tuple {
   /// the correct size (i.e. TotalByteSize()).
   void DeepCopy(Tuple* dst, const TupleDescriptor& desc, MemPool* pool);
 
+  /// Create a copy of 'this', including all of its referenced variable-length data
+  /// (i.e. strings and collections), using pool to allocate memory. Returns the copy.
+  Tuple* DeepCopyDedupStrings(const TupleDescriptor& desc, Tuple* last, MemPool* pool);
+
+  /// Create a copy of 'this', including all its referenced variable-length data
+  /// (i.e. strings and collections), using pool to allocate memory. This version does
+  /// not allocate a tuple, instead copying to 'dst'. 'dst' must already be allocated to
+  /// the correct size (i.e. TotalByteSize()).
+  void DeepCopyDedupStrings(Tuple* dst, const TupleDescriptor& desc, Tuple* last, MemPool* pool);
+
   /// Create a copy of 'this', including all referenced variable-length data (i.e. strings
   /// and collections), into 'data'. The tuple is written first, followed by any
   /// variable-length data. 'data' and 'offset' will be incremented by the total number of
@@ -143,6 +153,9 @@ class Tuple {
   /// into 'data'. Otherwise they will remain pointers directly into data. The offsets are
   /// determined by 'offset', where '*offset' corresponds to address '*data'.
   void DeepCopy(const TupleDescriptor& desc, char** data, int* offset,
+                bool convert_ptrs = false);
+
+  void DeepCopyDedupStrings(const TupleDescriptor& desc, Tuple* prev_tuple, Tuple* prev_serialized_tuple, char** data, int* offset,
                 bool convert_ptrs = false);
 
   /// This function should only be called on tuples created by DeepCopy() with
@@ -340,10 +353,15 @@ class Tuple {
   /// copying data, then updating pointers in tuple to reference copied data.
   void DeepCopyVarlenData(const TupleDescriptor& desc, MemPool* pool);
 
+  void DeepCopyVarlenDataDedupStrings(const TupleDescriptor& desc, Tuple* last, MemPool* pool);
+
   /// Copies all referenced string and collection data into 'data'. Increments 'data' and
   /// 'offset' by the number of bytes written. Recursively writes collection tuple data
   /// and referenced collection and string data.
   void DeepCopyVarlenData(const TupleDescriptor& desc, char** data, int* offset,
+      bool convert_ptrs);
+
+  void DeepCopyVarlenDataDedupStrings(const TupleDescriptor& desc, Tuple* prev_tuple, Tuple* prev_serialized_tuple, char** data, int* offset,
       bool convert_ptrs);
 
   /// During the construction of hand-crafted codegen'd functions, types cannot generally
