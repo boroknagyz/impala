@@ -173,13 +173,17 @@ Status IcebergDeleteBuilder::CalculateDataFiles() {
 
       memcpy(ptr_copy, file_path_str.c_str(), file_path_str.length());
 
-      std::pair<DeleteRowHashTable::iterator, bool> retval =
-          deleted_rows_.emplace(std::piecewise_construct,
+      std::pair<IntermediateDeleteRowHashTable::iterator, bool> retval =
+          intermediate_delete_rows_.emplace(std::piecewise_construct,
               std::forward_as_tuple(ptr_copy, file_path_str.length()),
               std::forward_as_tuple());
 
       // emplace succeeded, reserve capacity for the new file
-      if (retval.second) retval.first->second.reserve(INITIAL_DELETE_VECTOR_CAPACITY);
+      if (retval.second) {
+        retval.first->second.reserve(INITIAL_DELETE_VECTOR_CAPACITY);
+        retval.first->second.emplace_back();
+        retval.first->second.back().reserve(INITIAL_DELETE_VECTOR_CAPACITY);
+      }
     }
   }
 
@@ -233,12 +237,25 @@ Status IcebergDeleteBuilder::FlushFinal(RuntimeState* state) {
 Status IcebergDeleteBuilder::FinalizeBuild(RuntimeState* state) {
   {
     SCOPED_TIMER(position_sort_timer_);
-    for (auto& ids : deleted_rows_) {
-      DeleteRowVector& vec = ids.second;
-      std::sort(vec.begin(), vec.end());
+    for (auto& positions : intermediate_delete_rows_) {
+      DeleteRowVector final_delete_vec;
+      IntermediateDeleteRowVector& intermediate_vec = positions.second;
+      if (intermediate_vec.size() == 1) {
+        final_delete_vec = std::move(intermediate_vec[0]);
+      } else {
+        final_delete_vec.reserve(intermediate_vec.back().capacity() * 2);
+        for (auto& vec : intermediate_vec) {
+          final_delete_vec.insert(final_delete_vec.end(), vec.begin(), vec.end());
+        }
+      }
+      intermediate_vec.clear();
+      std::sort(final_delete_vec.begin(), final_delete_vec.end());
 
       // Iceberg allows concurrent deletes, there can be duplicates
-      vec.erase(std::unique(vec.begin(), vec.end()), vec.end());
+      final_delete_vec.erase(std::unique(final_delete_vec.begin(),
+                                         final_delete_vec.end()),
+                             final_delete_vec.end());
+      deleted_rows_[positions.first] = std::move(final_delete_vec);
     }
   }
 
@@ -269,6 +286,19 @@ string IcebergDeleteBuilder::DebugString() const {
   return ss.str();
 }
 
+void IcebergDeleteBuilder::AddToIntermediateDeleteRows(IntermediateDeleteRowVector&
+    intermediate_vector, int64_t pos) {
+  auto& curr_vec = intermediate_vector.back();
+  if (LIKELY(curr_vec.size() < curr_vec.capacity())) {
+    curr_vec.push_back(pos);
+  } else {
+    intermediate_vector.emplace_back();
+    auto& new_vec = intermediate_vector.back();
+    new_vec.reserve(curr_vec.capacity() * 2);
+    new_vec.push_back(pos);
+  }
+}
+
 Status IcebergDeleteBuilder::ProcessBuildBatch(RuntimeState* state,
     RowBatch* build_batch) {
   FOREACH_ROW(build_batch, 0, build_batch_iter) {
@@ -283,11 +313,11 @@ Status IcebergDeleteBuilder::ProcessBuildBatch(RuntimeState* state,
           ErrorMsg(TErrorCode::GENERAL, "NULL found as file_path in delete file"));
       continue;
     }
-    int64_t* id = build_row->GetTuple(0)->GetBigIntSlot(pos_offset_);
-    auto it = deleted_rows_.find(*file_path);
+    int64_t* pos = build_row->GetTuple(0)->GetBigIntSlot(pos_offset_);
+    auto it = intermediate_delete_rows_.find(*file_path);
     // deleted_rows_ filled with the relevant data file names, processing only those.
-    if (it != deleted_rows_.end()) {
-      it->second.emplace_back(*id);
+    if (it != intermediate_delete_rows_.end()) {
+      AddToIntermediateDeleteRows(it->second, *pos);
     }
   }
 

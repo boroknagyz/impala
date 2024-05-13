@@ -115,6 +115,11 @@ class IcebergDeleteBuilder : public JoinBuilder {
     }
   };
 
+  using IntermediateDeleteRowVector = std::vector<std::vector<int64_t>>;
+  using IntermediateDeleteRowHashTable =
+      std::unordered_map<impala::StringValue, IntermediateDeleteRowVector,
+          StringValueHashWrapper>;
+
   using DeleteRowVector = std::vector<int64_t>;
   using DeleteRowHashTable =
       std::unordered_map<impala::StringValue, DeleteRowVector, StringValueHashWrapper>;
@@ -131,6 +136,9 @@ class IcebergDeleteBuilder : public JoinBuilder {
 
   /// Helper method for FlushFinal() that does the actual work.
   Status FinalizeBuild(RuntimeState* state);
+
+  void AddToIntermediateDeleteRows(IntermediateDeleteRowVector&
+    intermediate_vector, int64_t pos);
 
   RuntimeState* const runtime_state_;
 
@@ -150,6 +158,8 @@ class IcebergDeleteBuilder : public JoinBuilder {
 
   // Use the length of a cache line as initial capacity
   static constexpr size_t INITIAL_DELETE_VECTOR_CAPACITY = 8;
+
+  IntermediateDeleteRowHashTable intermediate_delete_rows_;
 
   // Stores {file_path: ordered row ids vector}
   DeleteRowHashTable deleted_rows_;
