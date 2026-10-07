@@ -59,7 +59,7 @@
 
 #include "common/names.h"
 
-DEFINE_int64(data_stream_sender_buffer_size, 16 * 1024,
+DEFINE_int64(data_stream_sender_buffer_size, 32 * 1024,
     "(Advanced) Max size in bytes which a row batch in a data stream sender's channel "
     "can accumulate before the row batch is sent over the wire.");
 DEFINE_int64_hidden(data_stream_sender_eos_timeout_ms, 60*60*1000,
